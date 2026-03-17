@@ -18,7 +18,8 @@ import {
   X,
   AlertTriangle,
   Camera,
-  ImagePlus
+  ImagePlus,
+  Minus
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { jsPDF } from 'jspdf';
@@ -42,6 +43,7 @@ declare module 'jspdf' {
 const STATUS_OPTIONS: { value: ItemStatus; label: string; color: string; icon: any }[] = [
   { value: 'CUMPLE', label: 'Cumple', color: 'bg-emerald-100 text-emerald-700 border-emerald-200', icon: Check },
   { value: 'NO_CUMPLE', label: 'No Cumple', color: 'bg-red-100 text-red-700 border-red-200', icon: X },
+  { value: 'NO_APLICA', label: 'No Aplica', color: 'bg-gray-100 text-gray-700 border-gray-200', icon: Minus },
 ];
 
 export default function App() {
@@ -59,6 +61,8 @@ export default function App() {
   const [reports, setReports] = useState<CheckItem[]>([]);
   const [view, setView] = useState<'form' | 'history'>('form');
   const [showToast, setShowToast] = useState(false);
+  const [logoError, setLogoError] = useState(false);
+  const [logoTimestamp] = useState(Date.now());
 
   const requiresCubicle = useMemo(() => 
     CUBICLE_REQUIRED_SERVICES.includes(selectedService), 
@@ -166,7 +170,7 @@ export default function App() {
     setTimeout(() => setShowToast(false), 3000);
   };
 
-  const generatePDF = () => {
+  const generatePDF = async () => {
     if (reports.length === 0) {
       alert('No hay reportes para generar PDF');
       return;
@@ -175,16 +179,42 @@ export default function App() {
     const doc = new jsPDF();
     const pageWidth = doc.internal.pageSize.getWidth();
 
+    // Load Logo
+    const loadLogo = (): Promise<HTMLImageElement | null> => {
+      return new Promise((resolve) => {
+        const img = new Image();
+        img.crossOrigin = 'Anonymous';
+        img.onload = () => {
+          // Verify it's not an empty image
+          if (img.width > 0 && img.height > 0) {
+            resolve(img);
+          } else {
+            resolve(null);
+          }
+        };
+        img.onerror = () => resolve(null);
+        img.src = `/logo.png?t=${logoTimestamp}`;
+      });
+    };
+
+    const logoImg = await loadLogo();
+    let headerY = 20;
+
+    if (logoImg) {
+      doc.addImage(logoImg, 'PNG', 14, 10, 25, 25, undefined, 'FAST');
+      headerY = 25;
+    }
+
     // Header
     doc.setFontSize(18);
     doc.setTextColor(20, 83, 45);
-    doc.text('Informe Consolidado de Ronda Biomédica', pageWidth / 2, 20, { align: 'center' });
+    doc.text('Informe Consolidado de Ronda Biomédica', pageWidth / 2, headerY, { align: 'center' });
     
     doc.setFontSize(10);
     doc.setTextColor(100);
-    doc.text(`Fecha de Reporte: ${new Date().toLocaleString()}`, 14, 30);
+    doc.text(`Fecha de Reporte: ${new Date().toLocaleString()}`, pageWidth / 2, headerY + 8, { align: 'center' });
 
-    let currentY = 40;
+    let currentY = headerY + 20;
 
     // Group by Service, then by Cubicle
     const grouped = reports.reduce((acc, item) => {
@@ -211,14 +241,15 @@ export default function App() {
 
         const tableData = items.map(item => {
           const equip = EQUIPMENT_LIST.find(e => e.id === item.equipmentId);
-          let statusText = `Funcional: ${item.status === 'CUMPLE' ? 'Cumple' : 'No Cumple'}\nEstético: ${item.aestheticStatus === 'CUMPLE' ? 'Cumple' : 'No Cumple'}`;
+          const getStatusText = (status?: string) => status === 'CUMPLE' ? 'Cumple' : status === 'NO_APLICA' ? 'No Aplica' : 'No Cumple';
+          let statusText = `Funcional: ${getStatusText(item.status)}\nEstético: ${getStatusText(item.aestheticStatus)}`;
           if (item.hasNovelty) {
             statusText += `\n[NOVEDAD]: ${item.noveltyDescription || 'Sí'}`;
           }
           
           const accInfo = item.accessories.map(acc => {
             const accName = equip?.accessories?.find(a => a.id === acc.accessoryId)?.name;
-            let accStatus = acc.status === 'CUMPLE' ? 'Cumple' : 'No Cumple';
+            let accStatus = getStatusText(acc.status);
             if (acc.hasNovelty) {
               accStatus += ` (Novedad: ${acc.noveltyDescription || 'Sí'})`;
             }
@@ -248,25 +279,76 @@ export default function App() {
           },
           margin: { left: 14, right: 14 },
           didParseCell: (data) => {
-            if (data.section === 'body' && data.column.index === 3) {
+            if (data.section === 'body') {
               const item = items[data.row.index];
-              if (item.photo) {
+              if (!item) return;
+              
+              // Hide default text for columns 1 and 2 to draw custom colored text
+              if (data.column.index === 1 || data.column.index === 2) {
+                const bgColor = data.cell.styles.fillColor;
+                data.cell.styles.textColor = Array.isArray(bgColor) ? bgColor : [255, 255, 255];
+              }
+
+              if (data.column.index === 3 && item.photo) {
                 data.cell.styles.minCellHeight = 35; // Altura mínima para que quepa la foto
               }
             }
           },
           didDrawCell: (data) => {
-            if (data.section === 'body' && data.column.index === 3) {
-              const item = items[data.row.index];
-              if (item.photo) {
-                try {
-                  const dim = 30; // 30x30 mm
-                  const x = data.cell.x + (data.cell.width - dim) / 2;
-                  const y = data.cell.y + 2;
-                  doc.addImage(item.photo, 'JPEG', x, y, dim, dim);
-                } catch (e) {
-                  console.error('Error adding image to cell', e);
-                  doc.text('Error', data.cell.x + 2, data.cell.y + 10);
+            if (data.section === 'body') {
+              // Custom text drawing for Estado and Accesorios
+              if (data.column.index === 1 || data.column.index === 2) {
+                const lines = data.cell.text;
+                doc.setFontSize(data.cell.styles.fontSize);
+                
+                const fontSizePt = Number(data.cell.styles.fontSize) || 8;
+                const lineHeightMm = (fontSizePt * 1.15) * 0.3527777778;
+                
+                // Calculate initial Y position safely
+                const padding = data.cell.padding || data.cell.styles.cellPadding || 2;
+                const paddingTop = Number(typeof padding === 'object' ? (padding.top || 2) : padding) || 2;
+                const paddingLeft = Number(typeof padding === 'object' ? (padding.left || 2) : padding) || 2;
+                
+                let textY = Number(data.cell.y || 0) + paddingTop + (fontSizePt * 0.3527777778);
+                const textX = Number(data.cell.x || 0) + paddingLeft;
+                
+                const linesArray = Array.isArray(lines) ? lines : [lines];
+                
+                linesArray.forEach(line => {
+                  const strLine = String(line || '');
+                  if (strLine.includes('No Cumple') || strLine.includes('NOVEDAD') || strLine.includes('Novedad')) {
+                    doc.setTextColor(220, 38, 38); // Red
+                  } else if (strLine.includes('No Aplica')) {
+                    doc.setTextColor(107, 114, 128); // Gray
+                  } else if (strLine.includes('Cumple')) {
+                    doc.setTextColor(5, 150, 105); // Green
+                  } else {
+                    doc.setTextColor(0, 0, 0); // Black
+                  }
+                  if (strLine.trim() !== '') {
+                    doc.text(strLine, textX, textY);
+                  }
+                  textY += lineHeightMm;
+                });
+              }
+
+              // Photo drawing
+              if (data.column.index === 3) {
+                const item = items[data.row.index];
+                if (item && item.photo) {
+                  try {
+                    const dim = 30; // 30x30 mm
+                    const cellX = Number(data.cell.x || 0);
+                    const cellY = Number(data.cell.y || 0);
+                    const cellWidth = Number(data.cell.width || 0);
+                    const x = cellX + (cellWidth - dim) / 2;
+                    const y = cellY + 2;
+                    doc.addImage(item.photo, 'JPEG', x, y, dim, dim);
+                  } catch (e) {
+                    console.error('Error adding image to cell', e);
+                    doc.setTextColor(200, 0, 0);
+                    doc.text('Error', Number(data.cell.x || 0) + 2, Number(data.cell.y || 0) + 10);
+                  }
                 }
               }
             }
@@ -285,8 +367,19 @@ export default function App() {
     <div className="min-h-screen bg-[#F8F9FA] text-[#1A1A1A] font-sans">
       {/* Navigation Rail */}
       <nav className="fixed left-0 top-0 h-full w-16 bg-[#151619] flex flex-col items-center py-8 space-y-8 z-50">
-        <div className="w-10 h-10 bg-emerald-500 rounded-xl flex items-center justify-center text-white shadow-lg">
-          <Stethoscope size={24} />
+        <div className="w-10 h-10 rounded-xl flex items-center justify-center overflow-hidden shadow-lg bg-white">
+          {!logoError ? (
+            <img 
+              src={`/logo.png?t=${logoTimestamp}`}
+              alt="Logo" 
+              className="w-full h-full object-contain p-1"
+              onError={() => setLogoError(true)} 
+            />
+          ) : (
+            <div className="w-full h-full bg-emerald-500 flex items-center justify-center text-white">
+              <Stethoscope size={24} />
+            </div>
+          )}
         </div>
         <button onClick={() => setView('form')} className={`p-3 rounded-xl transition-all ${view === 'form' ? 'bg-white/10 text-emerald-400' : 'text-gray-500'}`}>
           <ClipboardCheck size={24} />
@@ -389,15 +482,15 @@ export default function App() {
                     
                     <div className="mb-4">
                       <label className="block text-[10px] font-black text-gray-400 uppercase tracking-widest mb-2">Estado Funcional</label>
-                      <div className="grid grid-cols-2 gap-2">
+                      <div className="grid grid-cols-3 gap-2">
                         {STATUS_OPTIONS.map((opt) => (
                           <button 
                             key={`func-${opt.value}`}
                             onClick={() => setCurrentCheck(prev => ({ ...prev, status: opt.value }))}
-                            className={`flex flex-col items-center justify-center p-3 rounded-xl border-2 transition-all ${currentCheck.status === opt.value ? opt.color : 'bg-white border-gray-100 text-gray-400 hover:border-gray-200'}`}
+                            className={`flex flex-col items-center justify-center p-2 rounded-xl border-2 transition-all ${currentCheck.status === opt.value ? opt.color : 'bg-white border-gray-100 text-gray-400 hover:border-gray-200'}`}
                           >
-                            <opt.icon size={20} className="mb-1" />
-                            <span className="text-xs font-black uppercase tracking-tighter">{opt.label}</span>
+                            <opt.icon size={16} className="mb-1" />
+                            <span className="text-[10px] font-black uppercase tracking-tighter">{opt.label}</span>
                           </button>
                         ))}
                       </div>
@@ -405,15 +498,15 @@ export default function App() {
 
                     <div className="mb-4">
                       <label className="block text-[10px] font-black text-gray-400 uppercase tracking-widest mb-2">Estado Estético</label>
-                      <div className="grid grid-cols-2 gap-2">
+                      <div className="grid grid-cols-3 gap-2">
                         {STATUS_OPTIONS.map((opt) => (
                           <button 
                             key={`aes-${opt.value}`}
                             onClick={() => setCurrentCheck(prev => ({ ...prev, aestheticStatus: opt.value }))}
-                            className={`flex flex-col items-center justify-center p-3 rounded-xl border-2 transition-all ${currentCheck.aestheticStatus === opt.value ? opt.color : 'bg-white border-gray-100 text-gray-400 hover:border-gray-200'}`}
+                            className={`flex flex-col items-center justify-center p-2 rounded-xl border-2 transition-all ${currentCheck.aestheticStatus === opt.value ? opt.color : 'bg-white border-gray-100 text-gray-400 hover:border-gray-200'}`}
                           >
-                            <opt.icon size={20} className="mb-1" />
-                            <span className="text-xs font-black uppercase tracking-tighter">{opt.label}</span>
+                            <opt.icon size={16} className="mb-1" />
+                            <span className="text-[10px] font-black uppercase tracking-tighter">{opt.label}</span>
                           </button>
                         ))}
                       </div>
@@ -566,14 +659,16 @@ export default function App() {
                           <div className="flex items-center space-x-4">
                             <div className="flex flex-col items-end space-y-1">
                               <span className={`text-[10px] font-black px-2 py-0.5 rounded ${
-                                item.status === 'CUMPLE' ? 'bg-emerald-100 text-emerald-700' : 'bg-red-100 text-red-700'
+                                item.status === 'CUMPLE' ? 'bg-emerald-100 text-emerald-700' : 
+                                item.status === 'NO_APLICA' ? 'bg-gray-100 text-gray-700' : 'bg-red-100 text-red-700'
                               }`}>
-                                FUNC: {item.status === 'CUMPLE' ? 'CUMPLE' : 'NO CUMPLE'}
+                                FUNC: {item.status === 'CUMPLE' ? 'CUMPLE' : item.status === 'NO_APLICA' ? 'NO APLICA' : 'NO CUMPLE'}
                               </span>
                               <span className={`text-[10px] font-black px-2 py-0.5 rounded ${
-                                item.aestheticStatus === 'CUMPLE' ? 'bg-emerald-100 text-emerald-700' : 'bg-red-100 text-red-700'
+                                item.aestheticStatus === 'CUMPLE' ? 'bg-emerald-100 text-emerald-700' : 
+                                item.aestheticStatus === 'NO_APLICA' ? 'bg-gray-100 text-gray-700' : 'bg-red-100 text-red-700'
                               }`}>
-                                EST: {item.aestheticStatus === 'CUMPLE' ? 'CUMPLE' : 'NO CUMPLE'}
+                                EST: {item.aestheticStatus === 'CUMPLE' ? 'CUMPLE' : item.aestheticStatus === 'NO_APLICA' ? 'NO APLICA' : 'NO CUMPLE'}
                               </span>
                               {item.hasNovelty && (
                                 <span className="text-[9px] font-bold px-2 py-0.5 rounded bg-amber-100 text-amber-700 flex items-center">
