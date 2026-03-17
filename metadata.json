@@ -1,0 +1,5 @@
+{
+  "name": "BiomedCheck UCI",
+  "description": "Aplicación de lista de chequeo para equipos biomédicos en UCI y servicios hospitalarios.",
+  "requestFramePermissions": []
+}
