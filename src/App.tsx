@@ -58,11 +58,26 @@ export default function App() {
     accessories: [],
     quantity: 1,
   });
-  const [reports, setReports] = useState<CheckItem[]>([]);
+  const [reports, setReports] = useState<CheckItem[]>(() => {
+    const saved = localStorage.getItem('biomedcheck_reports');
+    if (saved) {
+      try {
+        return JSON.parse(saved);
+      } catch (e) {
+        console.error('Error parsing saved reports', e);
+        return [];
+      }
+    }
+    return [];
+  });
   const [view, setView] = useState<'form' | 'history'>('form');
   const [showToast, setShowToast] = useState(false);
   const [logoError, setLogoError] = useState(false);
   const [logoTimestamp] = useState(Date.now());
+
+  React.useEffect(() => {
+    localStorage.setItem('biomedcheck_reports', JSON.stringify(reports));
+  }, [reports]);
 
   const requiresCubicle = useMemo(() => 
     CUBICLE_REQUIRED_SERVICES.includes(selectedService), 
@@ -361,6 +376,11 @@ export default function App() {
     });
 
     doc.save(`Ronda_Biomedica_${new Date().toISOString().split('T')[0]}.pdf`);
+
+    // Clear reports after successful download
+    setReports([]);
+    localStorage.removeItem('biomedcheck_reports');
+    alert('Reporte descargado exitosamente. Los registros han sido borrados para una nueva ronda.');
   };
 
   return (
@@ -465,10 +485,21 @@ export default function App() {
                         <Box size={14} className="mr-1" /> Cantidad
                       </label>
                       <input 
-                        type="number"
-                        min="1"
-                        value={currentCheck.quantity || 1}
-                        onChange={(e) => setCurrentCheck(prev => ({ ...prev, quantity: Math.max(1, parseInt(e.target.value) || 1) }))}
+                        type="text"
+                        inputMode="numeric"
+                        pattern="[0-9]*"
+                        value={currentCheck.quantity === undefined ? '' : currentCheck.quantity}
+                        onChange={(e) => {
+                          const val = e.target.value;
+                          if (val === '') {
+                            setCurrentCheck(prev => ({ ...prev, quantity: undefined }));
+                          } else {
+                            const parsed = parseInt(val, 10);
+                            if (!isNaN(parsed)) {
+                              setCurrentCheck(prev => ({ ...prev, quantity: parsed }));
+                            }
+                          }
+                        }}
                         className="w-full bg-gray-50 border-none rounded-xl p-3 font-bold text-gray-700 focus:ring-2 focus:ring-emerald-500"
                       />
                     </motion.div>
